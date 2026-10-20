@@ -60,6 +60,36 @@ Inbound clipboard file transfer requires the `client-to-server` Cargo feature,
 enabled by default. To use software encoding with inbound transfer, build with
 `--no-default-features --features client-to-server`.
 
+## NVIDIA NVENC (optional)
+
+Build this fork with `cargo build --release --features nvenc` to enable NVIDIA
+H.264 hardware encoding. Install the FFmpeg development libraries (`libavcodec`,
+`libavutil`, `libswscale`) in addition to the dependencies above. On Arch these
+are provided by `ffmpeg`; on Debian/Ubuntu install `libavcodec-dev libavutil-dev
+libswscale-dev`. At runtime you need those libraries, an NVIDIA driver with
+NVENC support, and FFmpeg built with the `h264_nvenc` encoder. No CUDA toolkit is
+needed to build this backend.
+
+Run with `--h264-backend nvenc --egfx-codec avc420` (or set `h264_backend = "nvenc"`
+in the config). Forced NVENC reports an error rather than silently encoding on
+the CPU when initialization fails. With the feature enabled, `auto` tries NVENC,
+then VA-API, then OpenH264 on the SHM capture path. Repeated hardware encoding
+failures in `auto` fall back to software. The existing VA-API DMA-BUF path remains
+VA-API-only and falls back to SHM when unavailable.
+
+NVENC currently supports AVC420 with BGRA capture converted to NV12 on the CPU;
+encoding runs on the GPU. It does not implement CUDA/DMA-BUF zero-copy capture
+or AVC444. Low-latency mode disables B-frames and lookahead. VBR/constant-QP,
+forced IDR recovery, and encoder recreation on resize are supported.
+
+Default builds and upstream release binaries remain independent of FFmpeg;
+`nvenc` is an opt-in Cargo feature. To test actual hardware encoding, decoding,
+and IDR recovery on an NVIDIA host:
+
+```sh
+cargo test --features nvenc nvenc_hardware_roundtrip_and_forced_idr -- --ignored
+```
+
 ## Quick start
 
 Run as the same user as Hyprland, inside its session:
@@ -125,7 +155,7 @@ Run `hypr-rdp --help` for all options.
 | `--pam-service` | PAM service name | `hypr-rdp` |
 | `--capture-mode` | `wlr` or `ext` capture protocol | `wlr` |
 | `--egfx-codec` | `avc420`, experimental `avc444`, `auto`, or `clearcodec` (lossless, damage-only ClearCodec instead of H.264 for EGFX clients) | `avc420` |
-| `--h264-backend` | `auto`, `software`, or `vaapi` | `auto` |
+| `--h264-backend` | `auto`, `software`, `vaapi`, or `nvenc` | `auto` |
 | `--bitrate` | Video bitrate in bits/s | `10000000` |
 | `--quality` | H.264 quality, 0–51 (lower is better) | `23` |
 | `--rate-control` | `vbr` or `cqp` | `vbr` |

@@ -45,7 +45,7 @@ pub(super) struct FrameProcessor {
     fps: u32,
     /// Whether we've sent at least one frame (first frame always sent)
     pub(super) sent_first_frame: bool,
-    /// Consecutive encode failure count for runtime VAAPI -> software fallback.
+    /// Consecutive encode failure count for runtime hardware -> software fallback.
     encode_failures: u32,
     pub(super) pending_damage_regions: Vec<(i32, i32, i32, i32)>,
     damage_detector: FrameDiffDamageDetector,
@@ -954,15 +954,15 @@ impl FrameProcessor {
                         shared.request_full_frame();
                     }
 
-                    // In auto mode, recover from repeated VA-API failures by
-                    // switching to software. Forced VA-API mode must never
+                    // In auto mode, recover from repeated hardware encoding failures by
+                    // switching to software. Forced hardware mode must never
                     // silently substitute a software H.264 encoder.
                     if self.encode_failures >= MAX_ENCODE_FAILURES
-                        && self.h264_encoder.as_ref().is_some_and(|e| e.is_vaapi())
+                        && self.h264_encoder.as_ref().is_some_and(|e| e.is_hardware())
                     {
                         if self.h264_backend.allows_runtime_software_fallback() {
                             tracing::warn!(
-                                "VA-API encode failed {} consecutive times, switching to software encoder",
+                                "Hardware encode failed {} consecutive times, switching to software encoder",
                                 self.encode_failures
                             );
                             let fallback_result =
@@ -990,7 +990,7 @@ impl FrameProcessor {
                         } else {
                             tracing::error!(
                                 failures = self.encode_failures,
-                                "Forced VA-API encoder failed repeatedly; disabling H.264 instead of switching backends"
+                                "Forced hardware encoder failed repeatedly; disabling H.264 instead of switching backends"
                             );
                             self.h264_encoder = None;
                             self.egfx_active = false;

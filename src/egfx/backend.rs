@@ -19,22 +19,29 @@ pub enum H264RateControl {
 /// Which H.264 backend encoder creation is allowed to pick.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum H264BackendPolicy {
-    /// Try VA-API, fall back to software (historical behavior).
+    /// Try NVENC (when enabled), then VA-API, then software.
     #[default]
     Auto,
-    /// Never try VA-API.
+    /// Never try hardware encoding.
     Software,
     /// Require VA-API; encoder creation fails if it is unavailable.
     Vaapi,
+    /// Require NVIDIA NVENC; never silently substitute software.
+    Nvenc,
 }
 
 impl H264BackendPolicy {
     pub(crate) fn allows_vaapi(self) -> bool {
-        self != Self::Software
+        matches!(self, Self::Auto | Self::Vaapi)
+    }
+
+    #[cfg(any(feature = "nvenc", test))]
+    pub(crate) fn allows_nvenc(self) -> bool {
+        matches!(self, Self::Auto | Self::Nvenc)
     }
 
     pub(crate) fn allows_software(self) -> bool {
-        self != Self::Vaapi
+        matches!(self, Self::Auto | Self::Software)
     }
 
     pub(crate) fn allows_runtime_software_fallback(self) -> bool {
@@ -42,8 +49,10 @@ impl H264BackendPolicy {
     }
 }
 
-/// Encoder backend: hardware VAAPI, common H.264 software, or AVC444 software.
+/// Encoder backend: hardware NVENC/VA-API, software H.264, or software AVC444.
 pub enum FrameEncoder {
+    #[cfg(feature = "nvenc")]
+    Nvenc(Box<super::nvenc::NvencEncoder>),
     #[cfg(feature = "vaapi")]
     Vaapi(Box<vaapi::VaapiEncoder>),
     #[cfg(test)]
@@ -66,6 +75,32 @@ impl FrameEncoder {
         quality: u8,
         rate_control: H264RateControl,
     ) -> Result<Self> {
+        #[cfg(feature = "nvenc")]
+        if policy.allows_nvenc() {
+            match super::nvenc::NvencEncoder::new(
+                width,
+                height,
+                bitrate,
+                fps,
+                quality,
+                rate_control,
+            ) {
+                Ok(enc) => {
+                    tracing::info!("Using NVIDIA NVENC hardware encoder");
+                    return Ok(Self::Nvenc(Box::new(enc)));
+                }
+                Err(error) if policy == H264BackendPolicy::Nvenc => {
+                    return Err(error.context("h264_backend=nvenc requested but NVENC init failed"));
+                }
+                Err(error) => {
+                    tracing::warn!("NVENC init failed, trying remaining backends: {error:#}")
+                }
+            }
+        }
+        #[cfg(not(feature = "nvenc"))]
+        if policy == H264BackendPolicy::Nvenc {
+            anyhow::bail!("h264_backend=nvenc requested but built without the nvenc feature");
+        }
         #[cfg(feature = "vaapi")]
         if policy.allows_vaapi() {
             match vaapi::VaapiEncoder::new(width, height, bitrate, fps, quality, rate_control) {
@@ -83,7 +118,7 @@ impl FrameEncoder {
         }
 
         #[cfg(not(feature = "vaapi"))]
-        if !policy.allows_software() {
+        if policy == H264BackendPolicy::Vaapi {
             anyhow::bail!("h264_backend=vaapi requested but built without the vaapi feature");
         }
 
@@ -96,6 +131,8 @@ impl FrameEncoder {
         match self {
             #[cfg(feature = "vaapi")]
             Self::Vaapi(enc) => enc.encode(bgra, stride),
+            #[cfg(feature = "nvenc")]
+            Self::Nvenc(enc) => enc.encode(bgra, stride),
             #[cfg(test)]
             Self::FailingVaapiForTest { .. } => anyhow::bail!("test VA-API encode failure"),
             Self::Software(enc) => enc.encode(bgra, stride),
@@ -126,6 +163,8 @@ impl FrameEncoder {
     ) -> Result<Avc444EncodedFrame> {
         match self {
             Self::SoftwareAvc444(enc) => enc.encode(bgra, stride, candidate_regions),
+            #[cfg(feature = "nvenc")]
+            Self::Nvenc(_) => anyhow::bail!("NVENC supports AVC420, not AVC444"),
             #[cfg(feature = "vaapi")]
             Self::Vaapi(_) => anyhow::bail!("AVC444 encoding requires software encoder"),
             #[cfg(test)]
@@ -149,6 +188,8 @@ impl FrameEncoder {
             #[cfg(feature = "vaapi")]
             Self::Vaapi(_) | Self::Software(_) => None,
             Self::FailingVaapiForTest { .. } => None,
+            #[cfg(feature = "nvenc")]
+            Self::Nvenc(_) => None,
             #[cfg(not(feature = "vaapi"))]
             Self::Software(_) => None,
         }
@@ -163,6 +204,8 @@ impl FrameEncoder {
             #[cfg(feature = "vaapi")]
             Self::Vaapi(_) | Self::Software(_) => None,
             Self::FailingVaapiForTest { .. } => None,
+            #[cfg(feature = "nvenc")]
+            Self::Nvenc(_) => None,
             #[cfg(not(feature = "vaapi"))]
             Self::Software(_) => None,
         }
@@ -189,6 +232,8 @@ impl FrameEncoder {
             #[cfg(test)]
             Self::FailingVaapiForTest { .. } => anyhow::bail!("test VA-API DMA-BUF failure"),
             Self::Software(_) => anyhow::bail!("DMA-BUF encode requires VA-API backend"),
+            #[cfg(feature = "nvenc")]
+            Self::Nvenc(_) => anyhow::bail!("NVENC currently requires SHM capture"),
             Self::SoftwareAvc444(_) => anyhow::bail!("DMA-BUF encode requires VA-API backend"),
         }
     }
@@ -199,6 +244,8 @@ impl FrameEncoder {
             Self::Vaapi(_) => "vaapi",
             #[cfg(test)]
             Self::FailingVaapiForTest { .. } => "vaapi-test-failing",
+            #[cfg(feature = "nvenc")]
+            Self::Nvenc(_) => "nvenc",
             Self::Software(_) => "openh264",
             Self::SoftwareAvc444(enc) => enc.backend_name(),
         }
@@ -210,12 +257,22 @@ impl FrameEncoder {
             Self::Vaapi(_) => true,
             #[cfg(test)]
             Self::FailingVaapiForTest { .. } => true,
+            #[cfg(feature = "nvenc")]
+            Self::Nvenc(_) => false,
             Self::Software(_) => false,
             Self::SoftwareAvc444(enc) => enc.is_vaapi(),
         }
     }
 
-    /// Create a software-only encoder (fallback when VA-API fails at runtime).
+    pub fn is_hardware(&self) -> bool {
+        #[cfg(feature = "nvenc")]
+        if matches!(self, Self::Nvenc(_)) {
+            return true;
+        }
+        self.is_vaapi()
+    }
+
+    /// Create a software-only encoder (fallback when hardware fails at runtime).
     pub fn new_software_only(
         width: u32,
         height: u32,
@@ -259,6 +316,9 @@ impl FrameEncoder {
         quality: u8,
         rate_control: H264RateControl,
     ) -> Result<Self> {
+        if policy == H264BackendPolicy::Nvenc {
+            anyhow::bail!("h264_backend=nvenc only supports AVC420, not AVC444");
+        }
         if !policy.allows_software() {
             anyhow::bail!("h264_backend=vaapi requested for AVC444, but the native VA-API backend only supports AVC420");
         }
@@ -316,6 +376,8 @@ impl FrameEncoder {
             Self::FailingVaapiForTest { force_idr_requests } => {
                 *force_idr_requests = force_idr_requests.saturating_add(1);
             }
+            #[cfg(feature = "nvenc")]
+            Self::Nvenc(enc) => enc.force_idr(),
             Self::Software(enc) => enc.force_idr(),
             Self::SoftwareAvc444(enc) => enc.force_idr(),
         }
@@ -332,6 +394,8 @@ impl FrameEncoder {
         match self {
             #[cfg(feature = "vaapi")]
             Self::Vaapi(_) => None,
+            #[cfg(feature = "nvenc")]
+            Self::Nvenc(_) => None,
             Self::FailingVaapiForTest { force_idr_requests } => Some(*force_idr_requests),
             Self::Software(enc) => Some(enc.force_idr_requests_for_test()),
             Self::SoftwareAvc444(enc) => Some(enc.force_idr_requests_for_test()),
@@ -362,17 +426,24 @@ mod tests {
 
     #[test]
     fn backend_policy_permissions_match_the_documented_modes() {
+        assert!(H264BackendPolicy::Auto.allows_nvenc());
         assert!(H264BackendPolicy::Auto.allows_vaapi());
         assert!(H264BackendPolicy::Auto.allows_software());
         assert!(H264BackendPolicy::Auto.allows_runtime_software_fallback());
 
+        assert!(!H264BackendPolicy::Software.allows_nvenc());
         assert!(!H264BackendPolicy::Software.allows_vaapi());
         assert!(H264BackendPolicy::Software.allows_software());
         assert!(!H264BackendPolicy::Software.allows_runtime_software_fallback());
 
+        assert!(!H264BackendPolicy::Vaapi.allows_nvenc());
         assert!(H264BackendPolicy::Vaapi.allows_vaapi());
         assert!(!H264BackendPolicy::Vaapi.allows_software());
         assert!(!H264BackendPolicy::Vaapi.allows_runtime_software_fallback());
+        assert!(H264BackendPolicy::Nvenc.allows_nvenc());
+        assert!(!H264BackendPolicy::Nvenc.allows_vaapi());
+        assert!(!H264BackendPolicy::Nvenc.allows_software());
+        assert!(!H264BackendPolicy::Nvenc.allows_runtime_software_fallback());
     }
 
     #[test]
@@ -424,5 +495,39 @@ mod tests {
             Err(error) => error,
         };
         assert!(format!("{avc444_error:#}").contains("native VA-API backend only supports AVC420"));
+    }
+    #[cfg(not(feature = "nvenc"))]
+    #[test]
+    fn forced_nvenc_reports_missing_feature() {
+        let result = FrameEncoder::new(
+            H264BackendPolicy::Nvenc,
+            64,
+            64,
+            1_000_000,
+            30,
+            23,
+            H264RateControl::Vbr,
+        );
+        match result {
+            Err(error) => assert!(format!("{error:#}").contains("built without the nvenc feature")),
+            Ok(_) => panic!("NVENC must be unavailable"),
+        }
+    }
+
+    #[test]
+    fn forced_nvenc_rejects_avc444_without_software_substitution() {
+        let result = FrameEncoder::new_avc444(
+            H264BackendPolicy::Nvenc,
+            64,
+            64,
+            1_000_000,
+            30,
+            23,
+            H264RateControl::Vbr,
+        );
+        match result {
+            Err(error) => assert!(format!("{error:#}").contains("nvenc only supports AVC420")),
+            Ok(_) => panic!("NVENC must not silently use software for AVC444"),
+        }
     }
 }

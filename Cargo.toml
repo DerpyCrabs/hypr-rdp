@@ -11,6 +11,8 @@ license = "MIT"
 # with inbound file transfer, or --no-default-features to omit both.
 default = ["vaapi", "client-to-server"]
 vaapi = ["dep:libva-sys"]
+# Optional NVIDIA encoding via the system FFmpeg libraries.
+nvenc = ["dep:cc", "dep:pkg-config"]
 client-to-server = ["dep:fuser"]
 
 [dependencies]
@@ -86,3 +88,6 @@ proptest = "1"
 # pam-sys uses bindgen 0.69 without default features. Match PipeWire's
 # clang-sys runtime loading so this bindgen instance loads libclang too.
 bindgen = { version = "0.69", default-features = false, features = ["runtime"] }
+
+cc = { version = "1", optional = true }
+pkg-config = { version = "0.3", optional = true }

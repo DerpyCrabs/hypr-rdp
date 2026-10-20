@@ -1,5 +1,13 @@
 # Changelog
 
+## [Unreleased — NVENC fork]
+
+### Added
+
+- Optional `nvenc` Cargo feature and `--h264-backend nvenc` for NVIDIA H.264/AVC420 encoding through FFmpeg. Supports low-latency output, VBR/CQP, forced IDR recovery, and padded BGRA input.
+- NVENC selection in SHM auto mode and hardware-to-software runtime fallback; forced hardware modes never silently substitute a software H.264 encoder.
+- Hardware roundtrip/IDR tests and CI coverage with and without VA-API. Default builds retain bundled software encoding without FFmpeg dependencies.
+
 ## [0.1.7] - 2026-10-20
 
 ### Added

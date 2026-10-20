@@ -21,7 +21,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libpipewire-0.3-dev libva-dev libxkbcommon-dev libwayland-dev libgbm-dev libpam0g-dev fuse3
+          sudo apt-get install -y libpipewire-0.3-dev libva-dev libxkbcommon-dev libwayland-dev libgbm-dev libpam0g-dev fuse3 libavcodec-dev libavutil-dev libswscale-dev
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -37,6 +37,12 @@ jobs:
 
       - name: Test default features
         run: cargo test
+
+      - name: Test NVENC feature (GPU tests remain opt-in)
+        run: cargo test --features nvenc
+
+      - name: Test NVENC without VA-API
+        run: cargo test --no-default-features --features nvenc
 
       - name: Test generated inputs
         run: PROPTEST_CASES=512 cargo test generated_

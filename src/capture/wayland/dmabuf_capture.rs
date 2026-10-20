@@ -566,7 +566,13 @@ pub(super) fn capture_loop_ext_dmabuf(
                 {
                     encode_failures.reset_window();
                     match crate::egfx::FrameEncoder::new(
-                        h264_backend,
+                        // This path imports VA-API DMA-BUFs. If VA-API is unavailable,
+                        // restart with SHM so auto can try NVENC or software.
+                        if h264_backend == H264BackendPolicy::Auto {
+                            H264BackendPolicy::Vaapi
+                        } else {
+                            h264_backend
+                        },
                         width,
                         height,
                         bitrate,

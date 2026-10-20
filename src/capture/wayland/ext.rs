@@ -517,6 +517,7 @@ mod tests {
             H264BackendPolicy::Auto,
             H264BackendPolicy::Software,
             H264BackendPolicy::Vaapi,
+            H264BackendPolicy::Nvenc,
         ] {
             for policy in [
                 EgfxCodecPolicy::Auto,
@@ -528,7 +529,7 @@ mod tests {
                 assert!(!shared.is_ready(), "setup occurs before negotiation");
                 assert_eq!(
                     dmabuf_setup_allowed(backend, Some(&shared), Some(&unscaled)),
-                    backend != H264BackendPolicy::Software && policy != EgfxCodecPolicy::ClearCodec,
+                    backend.allows_vaapi() && policy != EgfxCodecPolicy::ClearCodec,
                     "backend {backend:?}, policy {policy:?}",
                 );
                 assert!(!dmabuf_setup_allowed(backend, Some(&shared), Some(&scaled)));
